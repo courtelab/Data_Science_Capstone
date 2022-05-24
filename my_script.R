@@ -30,7 +30,7 @@ test_set <- test_set %>% # modifications for test set
 
 #### naive model : calculating the Mean mu
 mu <- mean(train_set$rating) # building the naive model
-train_set %>%
+train_set <- train_set %>%
   mutate(mu = mu)
 
 predicted_ratings <- mu  # calculating the prediction on the test set
