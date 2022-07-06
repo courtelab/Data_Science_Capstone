@@ -1,0 +1,310 @@
+---
+title: "MovieLens Project"
+date: "`r format(Sys.Date())`"
+output:
+  github_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+load("~/Capstone_Movielens.RData")
+```
+
+## EXECUTIVE SUMMARY
+
+The goal is to create a movie recommendation system using the MovieLens Dataset: <https://grouplens.org/datasets/movielens/10m/>.\
+the train and validation sets are provided within the course in www.edx.org.\
+
+We develop our algorithm using the edx set.\
+For a final test of our final algorithm, we predict movie ratings in the validation set (the final hold-out test set) as if they were unknown.\
+RMSE will be used to evaluate how close our predictions are to the true values in the validation set (the final hold-out test set).\
+
+Few basic observations:
+
+```{r 5 first lines, warning=FALSE}
+head(train_set[,1:6], 5) %>% knitr::kable(align = "c", caption = "First 5 instances of edx set")
+```
+
+**The output we want to predict/estimate is the *rating* variable.**\
+
+The edx set and the validation set have the following dimensions:\
+```{r dimensions, warning=FALSE}
+paste("Instances of the edx set:", nrow(train_set[,1:6]), " ")
+paste("Instances of the validation set:", nrow(test_set[,1:6]), " ")
+paste("Variables of the edx and validation set:", length(train_set[,1:6]), " ")
+```
+
+```{r variables, warning=FALSE}
+data.frame("Data_variables" = colnames(train_set[,1:6])) %>% knitr::kable(align = "c", caption = "Original Variable names")
+```
+
+Key steps to create the movie recommendation system:\
+  
+**First step:** Data cleaning, exploration and visualization\
+**Second step:** Building the model with the edx set using the user, movie, time and genres effects\
+**Third step:** Tuning regularization with a partition of the edx set\
+**Fourth step:** Applying the models and regularization to the validation set and checking the RMSE results\
+\newpage
+
+## METHOD AND ANALYSIS
+
+### PRELIMINARY
+
+The initial script comes from EDX course, and it creates edx and validation sets.\
+
+In order to avoid modifying the original data, the files are renamed:\
+edx --\> train_set\
+validation --\> test_set\
+    
+### DATA CLEANING, EXPLORATION AND VISUALIZATION
+
+We identify 3 main *predictors*: **MovieId**, **userId** and **genres**.\
+We will see a bit later how we can transform the **timestamp** as a *predictor*.
+
+See below the number of the main 3 unique *predictors* in the data set :\
+
+```{r number of movies, warning=FALSE}
+table_data <- data.frame(variable = c("movies", "users", "genres"),
+                         unique_numbers = c(n_distinct(train_set$movieId),
+                                    n_distinct(train_set$userId),
+                                    n_distinct(train_set$genres)))
+table_data %>% knitr::kable(align = "c", caption = "Number of unique predictors")
+```
+
+The unique number of each predictor is high, so training a model may freeze and fail Rstudio.\
+
+Below, for information, we have calculated the 5 most rated movies of the data set :\
+
+```{r the 5 most rated movies, message=FALSE, warning=FALSE}
+train_set %>% group_by(movieId, title) %>%
+	summarize(count = n()) %>%
+	arrange(desc(count)) %>%
+  head(5) %>%
+  knitr::kable(align = "c", caption = "5 most rated movies")
+```
+
+...and the 5 least rated movies of the data set :\
+
+```{r the 5 least rated movies, message = FALSE, warning=FALSE}
+train_set %>% group_by(movieId, title) %>%
+	summarize(count = n()) %>%
+	arrange(desc(count)) %>%
+  tail(5) %>%
+  knitr::kable(align = "c", caption = "5 least rated movies")
+```
+
+The data base include a **timestamp**, which corresponds to the date of rating.\
+The **timestamp** can be converted into rating date's year, with a new column called **ratingDate** :\
+
+```{r timestamp, warning=FALSE}
+train_set %>%
+  select(timestamp, title, ratingDate) %>%
+  head(5) %>%
+  knitr::kable(align = "c", caption = "Creation of ratingDate column")
+```
+
+In the title of the movie, we can see the year of release of the movie.\
+We can extract this year, and create a new column called **movieDate**.\
+
+```{r movieDate, warning = FALSE}
+train_set %>%
+  select(timestamp, title, ratingDate, movieDate) %>%
+  head(5) %>%
+  knitr::kable(align = "c", caption = "Creation of movieDate column")
+```
+
+It can be interesting to have a *predictor* based on time difference between the year of the rating and the year of release of the movie.\
+We can estimate that if a movie was released long time ago compare to the date of watching (and rating), it might have less impact on the user, compare to a fresh new movie.\
+We call this new column **ratingPeriod**, and we will check the effect later.\
+
+In very few cases compare to the total number of instances, the **ratingPeriod** is less than 0.\
+
+```{r negative ratingPeriod, warning = FALSE}
+neg_ratinPeriog %>%
+  knitr::kable(align = "c", caption = "Negative ratingPeriod")
+```
+
+In order to avoid this situation, we modify the **ratingPeriod** to 0 when it appears negative initially. it makes more sense.\
+
+After this modification, see below the number of movies with **ratingPeriod** less or equal to 5:\
+
+```{r min ratingPeriod, warning=FALSE}
+train_set %>%
+  select(timestamp, title, ratingDate, movieDate, ratingPeriod) %>%
+  group_by(ratingPeriod) %>%
+  arrange(ratingPeriod) %>%
+  summarize(n = n()) %>%
+  head(5) %>%
+  knitr::kable(align = "c", caption = "5 lowest ratingPeriod")
+```
+
+See below the number of movies with the 5 highest **ratingPeriod**:\
+
+```{r max ratingPeriod, warning=FALSE}
+train_set %>%
+  select(timestamp, title, ratingDate, movieDate, ratingPeriod) %>%
+  group_by(ratingPeriod) %>%
+  arrange(ratingPeriod) %>%
+  summarize(n = n()) %>%
+  tail(5) %>%
+  knitr::kable(align = "c", caption = "5 highest ratingPeriod")
+```
+
+The train_set and test_set are entirely modified to add the **ratingPeriod** column.
+
+### METHOD
+
+Due to the high unique number of movies and users, training the data set is not feasible.\
+Then we will build the model, according to the following formula:\
+$$Y_{u,i,t,g} = \mu + b_i(\lambda) + b_u(\lambda) + b_t(\lambda) + b_g(\lambda) + \varepsilon_{u,i,t,g}(\lambda)$$\
+
+Where:\
+$Y_{u,i,t,g}$ represents the estimated value.\
+$\mu$ represents the mean\
+$b_i$ represents the movie effect\
+$b_u$ represents the user effect\
+$b_t$ represents the time effect\
+$b_g$ represents the gender effect\
+$\lambda$ represents the regularization tuning parameter\
+
+We will tune regularization parameter $\lambda$ by creating a partition of the train_set.
+
+Once the model with regularization is built, we calculate the RMSE of the validation set (test_set).\
+\newpage
+
+## MODELING
+
+### THE NAIVE MODEL
+    
+We build a naive model where all movies are rated the average $\mu$.\
+$$Y = \mu + \varepsilon_{}$$\
+
+We calculate the rating average of the train_set.
+
+```{r naive model, warning=FALSE}
+paste("The average of the ratings in the train_set is:", mu, " ")
+```
+
+The next step is to include the movie effect.\
+
+### THE FIRST MODEL
+
+The 1st model calculate the movie effect $b_i$ from the training set.\
+$$Y_{i} = \mu + b_i + \varepsilon_{i}$$\
+
+We can visualize the distribution of the movie effect on the drawing below:\
+
+```{r first model histogram, warning=FALSE}
+movie_avgs %>% qplot(b_i, geom ="histogram", bins = 50, data = ., color = I("black")) +
+  scale_x_continuous(limits = c(-2, 2))
+```
+
+The effect is important.\
+
+The next step is to include the user effect.\
+
+### THE SECOND MODEL
+
+The 2nd model calculate the user effect $b_u$ from the training set.\
+$$Y_{u,i} = \mu + b_i + b_u + \varepsilon_{u,i}$$\
+
+We can visualize the distribution of the user effect on the drawing below:\
+
+```{r second model histogram, warning=FALSE}
+user_avgs %>% qplot(b_u, geom ="histogram", bins = 50, data = ., color = I("black")) +
+  scale_x_continuous(limits = c(-2, 2))
+```
+
+The effect is important.\
+
+The next step is to include the time effect.\
+
+### THE THIRD MODEL
+
+The 3nd model calculate the time effect $b_t$ from the training set.\
+$$Y_{u,i,t} = \mu + b_i + b_u + b_t + \varepsilon_{u,i,t}$$\
+
+We can visualize the distribution of the time effect on the drawing below:\
+
+```{r third model histogram, warning=FALSE}
+time_avgs %>% qplot(b_t, geom ="histogram", bins = 100, data = ., color = I("black")) +
+  scale_x_continuous(limits = c(-2, 2))
+```
+
+The effect is not very important, but not negligible.\
+
+The next step is to include the genres effect.\
+
+### THE FOURTH MODEL
+
+\
+The 4th model calculate the genres effect $b_g$ from the training set.\
+$$Y_{u,i,t,g} = \mu + b_i + b_u + b_t + b_g + \varepsilon_{u,i,t,g}$$\
+
+We can visualize the distribution of the genres effect on the drawing below:\
+
+```{r fourth model histogram, warning=FALSE}
+genre_avgs %>% qplot(b_g, geom ="histogram", bins = 100, data = ., color = I("black")) +
+  scale_x_continuous(limits = c(-2, 2))
+```
+
+The effect is not very important, but not negligible.\
+
+We continue optimizing the model with regularization.\
+
+### REGULARIZATION
+
+In order to avoid tuning with the test set (validation set), we create a partition on the train set (random cut by half).\
+
+We tune lambda $\lambda$ from 0 to 10 with steps each 0.25 and perform tuning with only the train set.\
+$$Y_{u,i,t,g} = \mu + b_i(\lambda) + b_u(\lambda) + b_t(\lambda) + b_g(\lambda) + \varepsilon_{u,i,t,g}(\lambda)$$\
+We obtain the following tuning graph and lambda value:\
+
+```{r regularization tuning process, warning=FALSE}
+qplot(lambdas, rmses)
+paste("the best tune of lambda is", l, " ")
+
+```
+
+We now obtain the final model for our recommendation movie system.\
+\newpage
+
+### RESULTS
+
+We now calculate the RMSE of the validation set considering the model with regularization we just built.\
+
+All the values of the predictors (userId, movieId, ratingPeriod, Genres) are in the train and test data sets (they have been built in such way), so we just need to apply *leftjoin* of the calculated effects from the training set to the test set with the best tune for the regularization. Then we can calculate the prediction and RMSE.\
+
+we get the following table:\
+
+```{r results, warning = FALSE}
+rmse_results %>%
+  knitr::kable(align = "c", caption = "RMSE results")
+```
+
+The results after adding genre effect and regularization is better that the target RMSE required by the project.\
+\newpage
+
+## CONCLUSION
+
+Due to the huge number of movies and users, our movie recommendation system is not training the data set (it is not feasible).\
+Instead, we build the model, according to the following formula:\
+$$Y_{u,i,t,g} = \mu + b_i(\lambda) + b_u(\lambda) + b_t(\lambda) + b_g(\lambda) + \varepsilon_{u,i,t,g}(\lambda)$$\
+
+We calculate the mean and we apply the following effects : movies, users, time and genres.\
+
+Then, we tune regularization on a partition of the train set to find the best tune of $\lambda$ .\
+
+Finally we apply the models and regularization to the test_set.\
+
+We can see the results in the table below:\
+
+```{r conclusion, warning = FALSE}
+rmse_results %>%
+  knitr::kable(align = "c", caption = "final RMSE")
+```
+
+The RMSE obtained by our recommendation movie system with all models + regularization is better than the performance required for the project.\
+
+
